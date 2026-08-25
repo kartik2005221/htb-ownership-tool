@@ -150,6 +150,37 @@ progress to the next rank versus the API's `current_rank_progress`.
 | `GET /api/v4/search/fetch?query=` | username → id resolution |
 | `GET /api/v5/user/profile/activity/{id}` | any user's own history for ownership reconstruction |
 
+### Just want the official number, fast?
+
+The API **does** report Content Ownership directly: `rank_ownership` in the
+profile endpoint is HTB's own figure (the same one the rank system uses):
+
+```bash
+curl -s -A "htb-cli" -H "Authorization: Bearer $HTB_TOKEN" \
+  "https://labs.hackthebox.com/api/v4/user/profile/basic/USER_ID" \
+  | jq '.profile.rank_ownership'
+```
+
+What that one-liner does *not* give you is the decomposition (how many active
+system/user/challenge owns it's made of) or any cross-check — that is what this
+script computes and verifies against the official value.
+
+## Performance
+
+Typical wall time is ~5–10 s. Where it goes and what was done about it:
+
+- The v5 machine-catalog endpoint is slow server-side (~11.5 s time-to-first-byte
+  for one giant `per_page=1000` request; gzip doesn't help — it's generation,
+  not transfer). The script instead fetches six `per_page=100` pages
+  **concurrently**, which takes ~3–4 s of wall time.
+- Challenge lists and the target user's activity feed are fetched in parallel
+  with the catalog (`ThreadPoolExecutor`, stdlib).
+- Run with `--timing` to see per-phase durations on stderr.
+
+Transient failures (socket timeouts mid-read, truncated chunked responses,
+connection resets, 5xx, 429) are retried automatically with backoff; only
+persistent failures produce an error.
+
 ## Error handling
 
 Failures produce specific messages, not tracebacks:
@@ -159,7 +190,7 @@ Failures produce specific messages, not tracebacks:
 | HTTP 401 `Unauthenticated.` or 302 → `/login` | token invalid/expired/revoked — generate a new one |
 | HTTP 403 with Cloudflare `error code: 1010` | request blocked by Cloudflare's browser-signature ban before reaching HTB (see below); also try disabling VPN/proxy exits |
 | HTTP 429 | rate limited (auto-retries with backoff) |
-| URLError | DNS/network/TLS problem reaching `labs.hackthebox.com` |
+| Timeout / connection errors | retried automatically; if persistent, the HTB API is slow or your network path is flaky |
 
 ## The original 403, explained (with evidence)
 
