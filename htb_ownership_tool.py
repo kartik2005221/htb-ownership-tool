@@ -556,7 +556,7 @@ def _prev_threshold(rank_name: str) -> float:
     return 0.0
 
 
-def render_text(r: dict) -> str:
+def render_text(r: dict, full: bool = False) -> str:
     WIDTH = 64
     o, w, t = r["owns"], r["content_totals"], r["ownership_percent"]
     nb = r["next_rank_by_ownership"]
@@ -569,79 +569,148 @@ def render_text(r: dict) -> str:
         return "  " + paint(text, Style.DIM, Style.BRIGHT_CYAN)
 
     def kv(label, value):
-        dots = "." * max(2, 24 - len(label))
+        dots = "." * max(2, 22 - len(label))
         return f"  {paint(label, Style.WHITE)} {paint(dots, Style.GREY)} {value}"
+
+    def sub(text):
+        return "      " + paint(text, Style.GREY)
+
+    def pct_str(v):
+        return paint(f"{float(v):.2f}%", Style.BOLD)
 
     out = []
     who = r["username"] or "?"
     if not r.get("is_self") and r.get("user_id"):
         who += f" (id {r['user_id']})"
 
-    out.append(rule("━", Style.CYAN))
-    title = "  HTB CONTENT OWNERSHIP · "
-    out.append(title + paint(who, Style.BOLD, Style.BRIGHT_CYAN))
-    out.append(rule("━", Style.CYAN))
+    banner = rule("━", Style.CYAN)
+    out.append(banner)
+    out.append("  " + paint("HTB CONTENT OWNERSHIP · ", Style.BOLD)
+               + paint(who, Style.BOLD, Style.BRIGHT_CYAN))
 
-    out.append(header("IDENTITY"))
-    rank_val = paint(str(r["rank"] or "-"), Style.BOLD,
-                     rank_color(r["rank"]))
-    if r.get("rank_from_ownership"):
-        computed = paint(str(r["rank_from_ownership"]), Style.BOLD,
-                         rank_color(r["rank_from_ownership"]))
-        rank_val += paint("   (from ownership: ", Style.GREY) + computed + paint(")", Style.GREY)
-    out.append(kv("Rank", rank_val))
-    ranking = "#" + str(r["global_ranking"]) if r["global_ranking"] else "-"
-    out.append(kv("Global ranking", paint(ranking, Style.BOLD)))
-    out.append(kv("Points", paint(str(r["points"] if r["points"] is not None else "-"),
-                                  Style.BOLD)))
-
-    out.append(header("CONTENT OWNERSHIP"))
     pct_v = t["overall"]
     tier = tier_color_for_pct(pct_v)
-    out.append(kv("Ownership",
-                  f"{bar(pct_v, color=tier)} {paint(f'{pct_v:.2f}%', Style.BOLD, tier)}"))
+    ownership_bar = f'{bar(pct_v, color=tier)} {paint(f"{pct_v:.2f}%", Style.BOLD, tier)}'
     reported = t.get("reported_by_api")
+    match_note = ""
     if reported is not None:
-        match = abs(float(reported) - float(pct_v)) < 0.01
-        mark = paint("✓ matches HTB" if match else "⚠ differs from HTB",
-                     Style.GREEN if match else Style.YELLOW)
-        out.append(kv("HTB API reports", f"{paint(f'{reported:.2f}%', Style.BOLD)} {mark}"))
-    out.append(kv("Active owns",
-                  paint("system ", Style.GREY) + paint(str(t["active_system_owns"]), Style.BOLD)
-                  + paint(" · user ", Style.GREY) + paint(str(t["active_user_owns"]), Style.BOLD)
-                  + paint(" · challenge ", Style.GREY) + paint(str(t["active_challenge_owns"]), Style.BOLD)))
+        ok = abs(float(reported) - float(pct_v)) < 0.01
+        match_note = ("  " + paint(("✓" if ok else "⚠") + f" HTB says {float(reported):.2f}%",
+                                   Style.GREEN if ok else Style.YELLOW))
 
-    out.append(header("ACTIVE CONTENT"))
-    out.append(kv("Machines",
-                  paint(str(w["machines_active"]), Style.BOLD, Style.GREEN)
-                  + paint(f" active / {w['machines_total']} total", Style.GREY)))
-    out.append(kv("Challenges",
-                  paint(str(w["challenges_active"]), Style.BOLD, Style.GREEN)
-                  + paint(f" active / {w['challenges_total']} total", Style.GREY)))
-
-    out.append(header("ALL-TIME OWNS"))
-    out.append(kv("Machine user", paint(str(o["machine_user_owns"]), Style.BOLD)))
-    out.append(kv("Machine system", paint(str(o["machine_system_owns"]), Style.BOLD)))
-    out.append(kv("Challenge solves", paint(str(o["challenge_solves"]), Style.BOLD)))
-
-    out.append(header("PROGRESSION"))
-    if nb.get("name"):
-        nxt_col = rank_color(nb["name"])
+    # ------------------------------------------------------------------ #
+    # SIMPLE MODE (default)
+    # ------------------------------------------------------------------ #
+    if not full:
+        rank_bits = [paint(str(r["rank"] or "-"), Style.BOLD, rank_color(r["rank"]))]
+        if r["rank_from_ownership"] and r["rank_from_ownership"] != r["rank"]:
+            rank_bits.append(paint(f'(ownership implies: {r["rank_from_ownership"]})',
+                                   Style.YELLOW))
+        out.append(kv("Rank",
+                      " ".join(rank_bits)
+                      + paint(f'  ·  #{r["global_ranking"] or "?"} global', Style.GREY)
+                      + paint(f'  ·  {r["points"] if r["points"] is not None else "?"} points',
+                              Style.GREY)))
+        out.append(kv("Ownership", ownership_bar + match_note))
+        out.append(sub(f'system {t["active_system_owns"]} · '
+                       f'user {t["active_user_owns"]} · '
+                       f'challenge {t["active_challenge_owns"]} (active content)'))
         out.append(kv("Next rank",
-                      paint(str(nb["name"]), Style.BOLD, nxt_col)
-                      + paint(f'  (> {nb["threshold"]:g}%)', Style.GREY)))
+                      (paint(str(nb.get("name")), Style.BOLD,
+                            rank_color(nb.get("name")))
+                       + paint(f'  (> {nb["threshold"]:g}%)', Style.GREY))
+                      if nb.get("name") else paint(str(pf.get("name") or "-"),
+                                                   Style.BOLD)))
         prog = nb.get("progress_percent")
         if prog is not None:
+            nxt_col = rank_color(nb.get("name"))
             out.append(kv("Progress",
-                          f"{bar(prog, color=nxt_col)} "
+                          f'{bar(prog, color=nxt_col)} '
                           + paint(f"{prog:.2f}%", Style.BOLD, nxt_col)))
-    elif pf.get("name"):
-        out.append(kv("Next rank", paint(str(pf["name"]),
-                                         Style.BOLD, rank_color(pf["name"]))))
+        out.append(kv("Active content",
+                      paint(f'{w["machines_active"]}', Style.BOLD, Style.GREEN)
+                      + paint(f'/{w["machines_total"]} machines', Style.GREY)
+                      + paint("  ·  ", Style.GREY)
+                      + paint(f'{w["challenges_active"]}', Style.BOLD, Style.GREEN)
+                      + paint(f'/{w["challenges_total"]} challenges', Style.GREY)))
 
-    out.append(rule("━", Style.CYAN))
-    out.append(paint("  formula & thresholds: help.hackthebox.com — 'Introduction to HTB Labs'",
-                     Style.DIM))
+    # ------------------------------------------------------------------ #
+    # FULL MODE (--full): every field the API gives us
+    # ------------------------------------------------------------------ #
+    else:
+        out.append(rule())
+
+        out.append(header("IDENTITY"))
+        out.append(kv("Username", paint(str(r["username"] or "-"), Style.BOLD)))
+        out.append(kv("User id", str(r.get("user_id") or "-")))
+        out.append(kv("Viewing", "your own account"
+                     if r.get("is_self") else "another user's public profile"))
+        out.append(kv("Rank (profile)",
+                      paint(str(r["rank"] or "-"), Style.BOLD, rank_color(r["rank"]))))
+        out.append(kv("Rank (computed)",
+                      paint(str(r["rank_from_ownership"] or "-"), Style.BOLD,
+                            rank_color(r["rank_from_ownership"]))))
+        out.append(kv("Global ranking",
+                      "#" + str(r["global_ranking"]) if r["global_ranking"] else "-"))
+        out.append(kv("Points", str(r["points"] if r["points"] is not None else "-")))
+
+        out.append(header("CONTENT OWNERSHIP (official HTB formula)"))
+        out.append(kv("Ownership", ownership_bar))
+        if reported is not None:
+            out.append(kv("Reported by API",
+                          pct_str(reported) + " " + match_note.strip()))
+        out.append(kv("Computation",
+                      paint(f'{t["numerator"]:g} / {t["denominator"]:g} × 100',
+                            Style.GREY)))
+        out.append(kv("Active system owns",
+                      f'{t["active_system_owns"]}'
+                      + paint("  (weight ×1)", Style.GREY)))
+        out.append(kv("Active user owns",
+                      f'{t["active_user_owns"]}'
+                      + paint("  (weight ×1/2)", Style.GREY)))
+        out.append(kv("Active challenge owns",
+                      f'{t["active_challenge_owns"]}'
+                      + paint("  (weight ×1/10)", Style.GREY)))
+
+        out.append(header("ACTIVE CONTENT"))
+        fetched = f'  ({w["fetched"]} records fetched)' if w.get("fetched") else ""
+        out.append(kv("Machines",
+                      f'{w["machines_active"]} active / {w["machines_total"]} total'
+                      + paint(fetched, Style.GREY)))
+        out.append(kv("Challenges",
+                      f'{w["challenges_active"]} active / {w["challenges_total"]} total'))
+        out.append(kv("Retired challenges", str(w["challenges_retired"])))
+
+        out.append(header("ALL-TIME OWNS"))
+        out.append(kv("Machine user owns", str(o["machine_user_owns"])))
+        out.append(kv("Machine system owns", str(o["machine_system_owns"])))
+        out.append(kv("Challenge solves", str(o["challenge_solves"])))
+
+        out.append(header("PROGRESSION"))
+        if nb.get("name"):
+            nxt_col = rank_color(nb["name"])
+            out.append(kv("Next rank (ownership)",
+                          paint(str(nb["name"]), Style.BOLD, nxt_col)
+                          + paint(f'  (threshold > {nb["threshold"]:g}%)', Style.GREY)))
+            prog = nb.get("progress_percent")
+            if prog is not None:
+                out.append(kv("Interpolated progress",
+                              f'{bar(prog, color=nxt_col)} '
+                              + paint(f"{prog:.2f}%", Style.BOLD, nxt_col)))
+        out.append(kv("API next-rank name",
+                      paint(str(pf.get("name") or "-"), Style.BOLD,
+                            rank_color(pf.get("name")))))
+        if pf.get("progress_percent") is not None:
+            out.append(kv("API rank progress", pct_str(pf["progress_percent"])))
+        if pf.get("points_remaining") is not None:
+            out.append(kv("API points remaining", str(pf["points_remaining"])))
+        if pf.get("system_owns_required") is not None:
+            out.append(kv("API sys owns required", str(pf["system_owns_required"])))
+
+    out.append(banner)
+    if full:
+        out.append(paint("  formula & thresholds: help.hackthebox.com — 'Introduction to HTB Labs'",
+                         Style.DIM))
     return "\n".join(out)
 
 
@@ -660,6 +729,8 @@ def main() -> int:
                         help="HTB user id or username (default: yourself)")
     parser.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON instead of text")
+    parser.add_argument("--full", "-f", action="store_true",
+                        help="show all available information (default: simple view)")
     parser.add_argument("--no-color", action="store_true",
                         help="disable colored output (also auto-disabled when "
                              "piped, or when NO_COLOR is set)")
@@ -709,7 +780,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        print(render_text(report))
+        print(render_text(report, full=args.full))
     return 0
 
     if args.json:
