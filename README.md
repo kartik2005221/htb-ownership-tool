@@ -29,50 +29,60 @@ prints it, or writes it anywhere. `.gitignore` blocks token/env files anyway.
 ## Example output
 
 ```
-==========================================================
+==============================================================
   HACK THE BOX — CONTENT OWNERSHIP OVERVIEW
-==========================================================
-  Username                   kallu752
-  Rank                       Hacker
-  Global ranking             #785
-  Points                     247
-----------------------------------------------------------
-  Machine user owns          27
-  Machine system owns        24
-  Machine full owns          24
-  Challenge solves           0
-----------------------------------------------------------
-  Machines total             548
-  Machines active            19
-  Challenges total           850
-  Challenges active          198
-----------------------------------------------------------
-  CONTENT OWNERSHIP          1.72%
-    machine ownership        4.38%
-    challenge ownership      0.0%
-----------------------------------------------------------
-  Next rank                  Pro Hacker
-  Progress to next rank      93.92%
-  Points remaining           19.566
-  System owns required       20
-==========================================================
+==============================================================
+  Username                       kallu752
+  Rank (profile)                 Hacker
+  Rank (from ownership)          Hacker
+  Global ranking                 #785
+  Points                         247
+--------------------------------------------------------------
+  Machine user owns (all time)   27
+  Machine system owns (all time) 24
+  Machine full owns (all time)   24
+  Challenge solves (all time)    0
+--------------------------------------------------------------
+  Machines total / active        548 / 19
+  Challenges total / active      850 / 198
+--------------------------------------------------------------
+  CONTENT OWNERSHIP (HTB formula) 43.48%
+    reported by HTB API          43.48%
+    active system owns (weight 1) 14
+    active user owns (weight 1/2) 14
+    active challenge owns (weight 1/10) 0
+--------------------------------------------------------------
+  Next rank: Pro Hacker (>45.0%) 93.92% there
+  API next-rank fields           Pro Hacker, progress 93.92%, points left 19.566, sys owns req 20
+==============================================================
 ```
 
-## What "Content Ownership %" means here
+## What "Content Ownership %" means
 
-HTB does not publish this number through the public API, so the script computes
-it transparently:
+Per HTB's official documentation ([Introduction to HTB Labs — Help Center](
+https://help.hackthebox.com/en/articles/5185158-introduction-to-htb-labs)),
+ownership is computed over **active content only** (retired machines/challenges
+contribute nothing, though an already-earned rank is never lost), weighted:
 
 ```
-ownership % = (fully-owned machines + solved challenges)
-              ------------------------------------------ × 100
-              (total machines + total challenges)
+ownership % = (ActiveSystemOwns + ActiveUserOwns/2 + ActiveChallengeOwns/10)
+              --------------------------------------------------------- × 100
+              (activeMachines + activeMachines/2 + activeChallenges/10)
 ```
 
-A machine counts as owned when **both** user and root flags are yours; a
-challenge counts once solved. Per-category percentages are shown separately.
-Sherlocks/Fortresses/Prolabs are out of scope for now but easy to add — the API
-returns per-user flags on their list endpoints too.
+- a machine root flag ("system own") counts fully, its user flag half
+- a challenge counts one tenth
+- "active" = `state == "free"` in `/api/v5/machines`; membership of
+  `/api/v4/challenge/list` for challenges (the `isActive` field is always false
+  and useless)
+
+Official rank thresholds: Noob ≥0%, Script Kiddie >5%, Hacker >20%, Pro Hacker
+>45%, Elite Hacker >70%, Guru >90%, Omniscient 100%.
+
+The script computes this independently and cross-checks it against HTB's own
+number (`rank_ownership` from the profile endpoint). On the test account both
+agree exactly (43.48%), as does the interpolated progress to next rank
+(93.92% vs the API's `current_rank_progress`).
 
 ## Data sources
 

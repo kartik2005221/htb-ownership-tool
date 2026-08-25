@@ -8,7 +8,8 @@ variable (never from files, never printed) and reports:
   - username, rank, global ranking, points
   - progress toward next rank
   - system owns / user owns (machines), challenge owns
-  - Content Ownership % (formula documented in README)
+  - Content Ownership % using HTB's official formula (active content only,
+    weighted: root 1, user 1/2, challenge 1/10) with rank-threshold ladder
   - active machines & challenges totals
 
 Tested endpoints (as used by app.hackthebox.com and htb-cli):
@@ -249,7 +250,7 @@ def fetch_machines(token: str) -> dict:
     root_owns = sum(1 for m in machines if m.get("authUserInRootOwns"))
     full_owns = sum(1 for m in machines
                     if m.get("authUserInUserOwns") and m.get("authUserInRootOwns"))
-    active = sum(1 for m in machines if m.get("state") == "free")
+    active = [m for m in machines if m.get("state") == "free"]
 
     return {
         "total": total_count if total_count is not None else len(machines),
@@ -257,7 +258,9 @@ def fetch_machines(token: str) -> dict:
         "user_owns": user_owns,
         "root_owns": root_owns,
         "full_owns": full_owns,
-        "active": active,
+        "active": len(active),
+        "active_user_owns": sum(1 for m in active if m.get("authUserInUserOwns")),
+        "active_system_owns": sum(1 for m in active if m.get("authUserInRootOwns")),
     }
 
 
@@ -270,6 +273,7 @@ def fetch_challenges(token: str) -> dict:
         "active": len(active),
         "retired": len(retired),
         "solved": sum(1 for c in all_ch if c.get("authUserSolve")),
+        "solved_active": sum(1 for c in active if c.get("authUserSolve")),
     }
 
 
@@ -277,22 +281,93 @@ def fetch_challenges(token: str) -> dict:
 # Report
 # --------------------------------------------------------------------------- #
 
-def pct(part: int, whole: int) -> float:
-    return round(100.0 * part / whole, 2) if whole else 0.0
+# Official HTB Ownership Percentage formula (Hack The Box Help Center,
+# "Introduction to HTB Labs", section "How Ranks are Achieved"):
+#
+#   (ActiveSystemOwns + (ActiveUserOwns / 2) + (ActiveChallengeOwns / 10))
+#   / (activeMachines + (activeMachines / 2) + (activeChallenges / 10)) * 100
+#
+# Only ACTIVE content counts. Rank thresholds: Noob >=0%, Script Kiddie >5%,
+# Hacker >20%, Pro Hacker >45%, Elite Hacker >70%, Guru >90%, Omniscient 100%.
+
+RANK_LADDER = [
+    ("Noob", 0.0),
+    ("Script Kiddie", 5.0),
+    ("Hacker", 20.0),
+    ("Pro Hacker", 45.0),
+    ("Elite Hacker", 70.0),
+    ("Guru", 90.0),
+    ("Omniscient", 100.0),
+]
+
+
+def rank_for(pct: float) -> str:
+    if pct >= 100:
+        return "Omniscient"
+    current = "Noob"
+    for name, threshold in RANK_LADDER[1:]:
+        if pct > threshold:
+            current = name
+        else:
+            break
+    return current
+
+
+def next_rank_info(pct: float):
+    for name, threshold in RANK_LADDER:
+        if pct <= threshold or (name == "Omniscient" and pct < 100 and threshold == 100):
+            return {"name": name, "threshold": threshold}
+    return None
+
+
+def official_ownership(machines: dict, challenges: dict) -> dict:
+    am = machines["active"]
+    ac = challenges["active"]
+    aso = machines["active_system_owns"]
+    auo = machines["active_user_owns"]
+    aco = challenges["solved_active"]
+
+    numerator = aso + (auo / 2) + (aco / 10)
+    denominator = am + (am / 2) + (ac / 10)
+    overall = round(100.0 * numerator / denominator, 2) if denominator else 0.0
+
+    return {
+        "overall": overall,
+        "active_system_owns": aso,
+        "active_user_owns": auo,
+        "active_challenge_owns": aco,
+        "numerator": round(numerator, 3),
+        "denominator": round(denominator, 3),
+    }
 
 
 def build_report(profile: dict, machines: dict, challenges: dict) -> dict:
-    # Content ownership: a machine counts once BOTH flags are owned;
-    # a challenge counts once solved.
-    content_owned = machines["full_owns"] + challenges["solved"]
-    content_total = machines["total"] + challenges["total"]
+    own_pct = official_ownership(machines, challenges)
+    pct_value = own_pct["overall"]
+
+    computed_rank = rank_for(pct_value)
+    nxt = next_rank_info(pct_value)
+    if nxt is not None:
+        progress = round(100.0 * (pct_value - _prev_threshold(computed_rank))
+                         / (nxt["threshold"] - _prev_threshold(computed_rank)), 2)
+    else:
+        progress = 100.0
 
     return {
         "username": profile.get("name") or profile.get("_auth_name"),
         "rank": profile.get("rank"),
+        "rank_from_ownership": computed_rank,
         "global_ranking": profile.get("ranking"),
         "points": profile.get("points"),
-        "next_rank": {
+        "ownership_percent": {
+            **own_pct,
+            "reported_by_api": profile.get("rank_ownership"),
+        },
+        "next_rank_by_ownership": {
+            **(nxt or {"name": None, "threshold": None}),
+            "progress_percent": progress,
+        },
+        "profile_next_rank_fields": {
             "name": profile.get("next_rank"),
             "progress_percent": profile.get("current_rank_progress"),
             "points_remaining": profile.get("next_rank_points"),
@@ -311,55 +386,60 @@ def build_report(profile: dict, machines: dict, challenges: dict) -> dict:
             "challenges_active": challenges["active"],
             "challenges_retired": challenges["retired"],
         },
-        "ownership_percent": {
-            "overall": pct(content_owned, content_total),
-            "machines": pct(machines["full_owns"], machines["total"]),
-            "challenges": pct(challenges["solved"], challenges["total"]),
-            "_formula": "(full machine owns + solved challenges) / (total machines + total challenges)",
-            "_owned_items": content_owned,
-            "_total_items": content_total,
-        },
     }
+
+
+def _prev_threshold(rank_name: str) -> float:
+    for name, threshold in RANK_LADDER:
+        if name == rank_name:
+            return threshold
+    return 0.0
 
 
 def render_text(r: dict) -> str:
     def line(label, value):
-        return f"  {label:<26} {value}"
+        return f"  {label:<30} {value}"
 
     o, w, t = r["owns"], r["content_totals"], r["ownership_percent"]
-    nr = r["next_rank"]
+    nb = r["next_rank_by_ownership"]
+    pf = r["profile_next_rank_fields"]
     out = []
-    out.append("=" * 58)
+    out.append("=" * 62)
     out.append("  HACK THE BOX — CONTENT OWNERSHIP OVERVIEW")
-    out.append("=" * 58)
+    out.append("=" * 62)
     out.append(line("Username", r["username"]))
-    out.append(line("Rank", r["rank"] or "-"))
+    out.append(line("Rank (profile)", r["rank"] or "-"))
+    out.append(line("Rank (from ownership)", r["rank_from_ownership"]))
     out.append(line("Global ranking", "#" + str(r["global_ranking"]) if r["global_ranking"] else "-"))
     out.append(line("Points", r["points"]))
-    out.append("-" * 58)
-    out.append(line("Machine user owns", o["machine_user_owns"]))
-    out.append(line("Machine system owns", o["machine_system_owns"]))
-    out.append(line("Machine full owns", o["machine_full_owns"]))
-    out.append(line("Challenge solves", o["challenge_solves"]))
-    out.append("-" * 58)
-    out.append(line("Machines total", w["machines_total"]))
-    out.append(line("Machines active", w["machines_active"]))
-    out.append(line("Challenges total", w["challenges_total"]))
-    out.append(line("Challenges active", w["challenges_active"]))
-    out.append("-" * 58)
-    out.append(line("CONTENT OWNERSHIP", f'{t["overall"]}%'))
-    out.append(line("  machine ownership", f'{t["machines"]}%'))
-    out.append(line("  challenge ownership", f'{t["challenges"]}%'))
-    out.append("-" * 58)
-    if nr["name"]:
-        out.append(line("Next rank", nr["name"]))
-        if nr["progress_percent"] is not None:
-            out.append(line("Progress to next rank", f'{nr["progress_percent"]}%'))
-        if nr["points_remaining"] is not None:
-            out.append(line("Points remaining", nr["points_remaining"]))
-        if nr["system_owns_required"] is not None:
-            out.append(line("System owns required", nr["system_owns_required"]))
-    out.append("=" * 58)
+    out.append("-" * 62)
+    out.append(line("Machine user owns (all time)", o["machine_user_owns"]))
+    out.append(line("Machine system owns (all time)", o["machine_system_owns"]))
+    out.append(line("Machine full owns (all time)", o["machine_full_owns"]))
+    out.append(line("Challenge solves (all time)", o["challenge_solves"]))
+    out.append("-" * 62)
+    out.append(line("Machines total / active", f'{w["machines_total"]} / {w["machines_active"]}'))
+    out.append(line("Challenges total / active", f'{w["challenges_total"]} / {w["challenges_active"]}'))
+    out.append("-" * 62)
+    out.append(line("CONTENT OWNERSHIP (HTB formula)", f'{t["overall"]}%'))
+    if t.get("reported_by_api") is not None:
+        out.append(line("  reported by HTB API", f'{t["reported_by_api"]}%'))
+    out.append(line("  active system owns (weight 1)", t["active_system_owns"]))
+    out.append(line("  active user owns (weight 1/2)", t["active_user_owns"]))
+    out.append(line("  active challenge owns (weight 1/10)", t["active_challenge_owns"]))
+    out.append("-" * 62)
+    if nb.get("name"):
+        out.append(line(f'Next rank: {nb["name"]} (>{nb["threshold"]}%)',
+                        f'{nb["progress_percent"]}% there'))
+    if pf.get("name"):
+        out.append(line("API next-rank fields", f'{pf["name"]}, '
+                        f'progress {pf["progress_percent"]}%, '
+                        f'points left {pf["points_remaining"]}, '
+                        f'sys owns req {pf["system_owns_required"]}'))
+    out.append("=" * 62)
+    out.append("  Ownership formula & rank thresholds:")
+    out.append("  help.hackthebox.com — 'Introduction to HTB Labs'")
+    out.append("=" * 62)
     return "\n".join(str(x) for x in out)
 
 
