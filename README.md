@@ -19,9 +19,21 @@ No pip installs. No config files. Token comes from an environment variable.
 3. Run:
 
    ```bash
-   python3 htb_ownership_tool.py          # human-readable table
-   python3 htb_ownership_tool.py --json   # machine-readable JSON
+   python3 htb_ownership_tool.py              # your own overview
+   python3 htb_ownership_tool.py 2274028      # any user by HTB id
+   python3 htb_ownership_tool.py someusername # or by username
+   python3 htb_ownership_tool.py --json       # machine-readable JSON
    ```
+
+### How other users' ownership is computed
+
+The `authUserIn*Owns` flags on list endpoints always describe **the token
+owner**, so for other users the script reconstructs their own-history from
+their public activity feed (`GET /api/v5/user/profile/activity/{id}`, entries
+`root` / `user` / `challenge`) and intersects it with the currently-active
+machine/challenge sets before applying HTB's formula. The result is
+cross-checked against that user's `rank_ownership` from their profile — on a
+Pro Hacker test account both agreed exactly (45.96%).
 
 The script only reads `HTB_TOKEN` from the environment — it never logs it,
 prints it, or writes it anywhere. `.gitignore` blocks token/env files anyway.
@@ -88,10 +100,12 @@ agree exactly (43.48%), as does the interpolated progress to next rank
 
 | Endpoint | Used for |
 |---|---|
-| `GET /api/v4/user/info` | auth sanity check, user id/name |
-| `GET /api/v4/user/profile/basic/{id}` | rank, ranking, points, owns, next-rank fields |
+| `GET /api/v4/user/info` | auth sanity check, own user id/name |
+| `GET /api/v4/user/profile/basic/{id}` | rank, ranking, points, owns, next-rank fields (any user) |
 | `GET /api/v5/machines?per_page=100&page=N` | full catalog + `authUserIn*Owns` flags; `state == "free"` = active |
 | `GET /api/v4/challenge/list`, `/challenge/list/retired` | totals + `authUserSolve` |
+| `GET /api/v4/search/fetch?query=` | username → id resolution |
+| `GET /api/v5/user/profile/activity/{id}` | any user's own history for ownership reconstruction |
 
 ## Error handling
 

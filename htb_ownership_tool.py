@@ -13,11 +13,17 @@ variable (never from files, never printed) and reports:
   - active machines & challenges totals
 
 Tested endpoints (as used by app.hackthebox.com and htb-cli):
-  GET {V4}/user/info                 -> auth sanity check + user id/name
-  GET {V4}/user/profile/basic/{id}   -> rank/points/owns/rank progress
+  GET {V4}/user/info                 -> auth sanity check + user id/name (self)
+  GET {V4}/user/profile/basic/{id}   -> rank/points/owns/rank progress (any user)
   GET {V5}/machines?per_page=100&page=N -> full catalog + per-user own flags
   GET {V4}/challenge/list            -> active challenges + authUserSolve
   GET {V4}/challenge/list/retired    -> retired challenges + authUserSolve
+  GET {V5}/user/profile/activity/{id} -> any user's own history (root/user/challenge)
+
+For your own account, ownership uses the authoritative authUser* flags.
+For other users (by id or username), their active owns are reconstructed from
+the public activity feed intersected with currently-active content, then
+cross-checked against HTB's reported rank_ownership.
 
 Auth notes (verified empirically):
   - A missing/expired token yields HTTP 302 -> https://app.hackthebox.com/login
@@ -216,16 +222,45 @@ def api_get_json(path: str, token: str, timeout: float = 30.0,
 # Data collection
 # --------------------------------------------------------------------------- #
 
-def fetch_profile(token: str) -> dict:
-    whoami = api_get_json(f"{API_V4}/user/info", token)
-    info = whoami.get("info") or {}
-    user_id, name = info.get("id"), info.get("name")
-    if not user_id:
-        raise ApiError("/user/info returned no user id — unexpected API answer.")
+def resolve_user(token: str, ref: str) -> dict:
+    """Accept a numeric HTB user id or an exact-ish username; return {id, name}."""
+    ref = str(ref).strip()
+    if ref.isdigit():
+        uid = int(ref)
+        basic = api_get_json(f"{API_V4}/user/profile/basic/{uid}", token)
+        profile = basic.get("profile") or {}
+        if not profile:
+            raise ApiError(f"No HTB user found with id {uid}.")
+        return {"id": uid, "name": profile.get("name")}
 
-    basic = api_get_json(f"{API_V4}/user/profile/basic/{user_id}", token)
+    results = api_get_json(f"{API_V4}/search/fetch?query={urllib.parse.quote(ref)}", token)
+    users = results.get("users") or []
+    if not users:
+        raise ApiError(f"No HTB user matching {ref!r}.")
+    exact = next((u for u in users if u.get("value", "").lower() == ref.lower()), users[0])
+    return {"id": exact["id"], "name": exact.get("value")}
+
+
+def fetch_profile(token: str, user_id: int | None = None) -> dict:
+    if user_id is None:
+        whoami = api_get_json(f"{API_V4}/user/info", token)
+        info = whoami.get("info") or {}
+        user_id, name = info.get("id"), info.get("name")
+        if not user_id:
+            raise ApiError("/user/info returned no user id — unexpected API answer.")
+        source = f"{API_V4}/user/profile/basic/{user_id}"
+    else:
+        name, source = None, f"{API_V4}/user/profile/basic/{user_id}"
+
+    basic = api_get_json(source, token)
     profile = basic.get("profile") or {}
+    if not profile:
+        raise ApiError(
+            f"Profile endpoint returned nothing for user {user_id} — the account "
+            "may not exist or its profile is private."
+        )
     profile["_auth_name"] = name
+    profile["_queried_user_id"] = user_id
     return profile
 
 
@@ -261,6 +296,7 @@ def fetch_machines(token: str) -> dict:
         "active": len(active),
         "active_user_owns": sum(1 for m in active if m.get("authUserInUserOwns")),
         "active_system_owns": sum(1 for m in active if m.get("authUserInRootOwns")),
+        "active_ids": {m["id"] for m in active},
     }
 
 
@@ -274,7 +310,44 @@ def fetch_challenges(token: str) -> dict:
         "retired": len(retired),
         "solved": sum(1 for c in all_ch if c.get("authUserSolve")),
         "solved_active": sum(1 for c in active if c.get("authUserSolve")),
+        "active_ids": {c["id"] for c in active},
     }
+
+
+def fetch_activity_owns(token: str, user_id: int, pause: float = 0.2) -> dict:
+    """Reconstruct a user's own-history from their public activity feed.
+
+    Activity entries look like {type: 'root'|'user'|'challenge', id: <content id>}.
+    Sets are de-duplicated (re-owned content after resets appears repeatedly).
+    Works for ANY user, unlike the authUser* flags which describe the token
+    owner only.
+    """
+    root_ids, user_ids, challenge_ids = set(), set(), set()
+    page = 1
+    while True:
+        payload = api_get_json(
+            f"{API_V5}/user/profile/activity/{user_id}?page={page}", token
+        )
+        entries = payload.get("data") or []
+        for e in entries:
+            etype, eid = e.get("type"), e.get("id")
+            if eid is None:
+                continue
+            if etype == "root":
+                root_ids.add(eid)
+            elif etype == "user":
+                user_ids.add(eid)
+            elif etype == "challenge":
+                challenge_ids.add(eid)
+
+        meta = payload.get("meta") or {}
+        last_page = meta.get("lastPage") or 1
+        if page >= last_page:
+            break
+        page += 1
+        time.sleep(pause)
+
+    return {"root_ids": root_ids, "user_ids": user_ids, "challenge_ids": challenge_ids}
 
 
 # --------------------------------------------------------------------------- #
@@ -320,12 +393,21 @@ def next_rank_info(pct: float):
     return None
 
 
-def official_ownership(machines: dict, challenges: dict) -> dict:
+def official_ownership(machines: dict, challenges: dict,
+                       activity_owns: dict | None = None) -> dict:
     am = machines["active"]
     ac = challenges["active"]
-    aso = machines["active_system_owns"]
-    auo = machines["active_user_owns"]
-    aco = challenges["solved_active"]
+
+    if activity_owns is not None:
+        # Another user's owns, reconstructed from their public activity feed
+        # intersected with the *currently active* content.
+        aso = len(activity_owns["root_ids"] & machines["active_ids"])
+        auo = len(activity_owns["user_ids"] & machines["active_ids"])
+        aco = len(activity_owns["challenge_ids"] & challenges["active_ids"])
+    else:
+        aso = machines["active_system_owns"]
+        auo = machines["active_user_owns"]
+        aco = challenges["solved_active"]
 
     numerator = aso + (auo / 2) + (aco / 10)
     denominator = am + (am / 2) + (ac / 10)
@@ -341,8 +423,9 @@ def official_ownership(machines: dict, challenges: dict) -> dict:
     }
 
 
-def build_report(profile: dict, machines: dict, challenges: dict) -> dict:
-    own_pct = official_ownership(machines, challenges)
+def build_report(profile: dict, machines: dict, challenges: dict,
+                 activity_owns: dict | None = None) -> dict:
+    own_pct = official_ownership(machines, challenges, activity_owns)
     pct_value = own_pct["overall"]
 
     computed_rank = rank_for(pct_value)
@@ -355,6 +438,8 @@ def build_report(profile: dict, machines: dict, challenges: dict) -> dict:
 
     return {
         "username": profile.get("name") or profile.get("_auth_name"),
+        "user_id": profile.get("_queried_user_id"),
+        "is_self": activity_owns is None,
         "rank": profile.get("rank"),
         "rank_from_ownership": computed_rank,
         "global_ranking": profile.get("ranking"),
@@ -374,10 +459,15 @@ def build_report(profile: dict, machines: dict, challenges: dict) -> dict:
             "system_owns_required": profile.get("rank_requirement"),
         },
         "owns": {
-            "machine_user_owns": machines["user_owns"],
-            "machine_system_owns": machines["root_owns"],
-            "machine_full_owns": machines["full_owns"],
-            "challenge_solves": challenges["solved"],
+            # All-time counts come from the profile endpoint, which carries the
+            # target user's own numbers for ANY user id.
+            "machine_user_owns": profile.get("user_owns",
+                                             machines["user_owns"]),
+            "machine_system_owns": profile.get("system_owns",
+                                               machines["root_owns"]),
+            "challenge_solves": (len(activity_owns["challenge_ids"])
+                                 if activity_owns is not None
+                                 else challenges["solved"]),
         },
         "content_totals": {
             "machines_total": machines["total"],
@@ -403,11 +493,14 @@ def render_text(r: dict) -> str:
     o, w, t = r["owns"], r["content_totals"], r["ownership_percent"]
     nb = r["next_rank_by_ownership"]
     pf = r["profile_next_rank_fields"]
+    who = r["username"] or "?"
+    if not r.get("is_self"):
+        who = f'{who} (id {r.get("user_id")})'
     out = []
     out.append("=" * 62)
     out.append("  HACK THE BOX — CONTENT OWNERSHIP OVERVIEW")
     out.append("=" * 62)
-    out.append(line("Username", r["username"]))
+    out.append(line("Username", who))
     out.append(line("Rank (profile)", r["rank"] or "-"))
     out.append(line("Rank (from ownership)", r["rank_from_ownership"]))
     out.append(line("Global ranking", "#" + str(r["global_ranking"]) if r["global_ranking"] else "-"))
@@ -415,7 +508,6 @@ def render_text(r: dict) -> str:
     out.append("-" * 62)
     out.append(line("Machine user owns (all time)", o["machine_user_owns"]))
     out.append(line("Machine system owns (all time)", o["machine_system_owns"]))
-    out.append(line("Machine full owns (all time)", o["machine_full_owns"]))
     out.append(line("Challenge solves (all time)", o["challenge_solves"]))
     out.append("-" * 62)
     out.append(line("Machines total / active", f'{w["machines_total"]} / {w["machines_active"]}'))
@@ -449,16 +541,28 @@ def render_text(r: dict) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Hack The Box Content Ownership overview (stdlib only)."
+        description="Hack The Box Content Ownership overview (stdlib only). "
+                    "Pass a numeric user id or username to inspect any account; "
+                    "omit it to inspect your own."
     )
+    parser.add_argument("user", nargs="?", default=None,
+                        help="HTB user id or username (default: yourself)")
     parser.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON instead of text")
     args = parser.parse_args()
 
     try:
         token = load_token()
-        print("[1/4] Authenticating...", file=sys.stderr)
-        profile = fetch_profile(token)
+        activity_owns = None
+
+        if args.user is None:
+            print("[1/4] Authenticating...", file=sys.stderr)
+            profile = fetch_profile(token)
+        else:
+            print(f"[1/4] Resolving user {args.user!r}...", file=sys.stderr)
+            target = resolve_user(token, args.user)
+            print(f"      -> {target['name']} (id {target['id']})", file=sys.stderr)
+            profile = fetch_profile(token, target["id"])
 
         print("[2/4] Fetching machine catalog...", file=sys.stderr)
         machines = fetch_machines(token)
@@ -466,8 +570,13 @@ def main() -> int:
         print("[3/4] Fetching challenges...", file=sys.stderr)
         challenges = fetch_challenges(token)
 
+        if args.user is not None:
+            print(f"[3b/4] Reconstructing {profile.get('name')}'s active owns "
+                  "from their activity feed...", file=sys.stderr)
+            activity_owns = fetch_activity_owns(token, profile["_queried_user_id"])
+
         print("[4/4] Building report...", file=sys.stderr)
-        report = build_report(profile, machines, challenges)
+        report = build_report(profile, machines, challenges, activity_owns)
     except HtbToolError as exc:
         print(f"\nERROR: {exc}", file=sys.stderr)
         return 1
