@@ -397,6 +397,15 @@ def fetch_machines(token: str) -> dict:
         "active_user_owns": sum(1 for m in active if m.get("authUserInUserOwns")),
         "active_system_owns": sum(1 for m in active if m.get("authUserInRootOwns")),
         "active_ids": {m["id"] for m in active},
+        "active_records": [
+            {"id": m["id"], "name": m.get("name") or str(m["id"]),
+             "difficulty": m.get("difficultyText") or "?",
+             "os": m.get("os") or "?"}
+            for m in active
+        ],
+        # Only meaningful for the token owner (self mode):
+        "active_user_ids": {m["id"] for m in active if m.get("authUserInUserOwns")},
+        "active_root_ids": {m["id"] for m in active if m.get("authUserInRootOwns")},
     }
 
 
@@ -414,6 +423,14 @@ def fetch_challenges(token: str) -> dict:
         "solved": sum(1 for c in all_ch if c.get("authUserSolve")),
         "solved_active": sum(1 for c in active if c.get("authUserSolve")),
         "active_ids": {c["id"] for c in active},
+        "active_records": [
+            {"id": c["id"], "name": c.get("name") or str(c["id"]),
+             "difficulty": c.get("difficulty") or "?",
+             "points": c.get("points") if c.get("points") is not None else "?"}
+            for c in active
+        ],
+        # Only meaningful for the token owner (self mode):
+        "solved_active_ids": {c["id"] for c in active if c.get("authUserSolve")},
     }
 
 
@@ -518,6 +535,61 @@ def official_ownership(machines: dict, challenges: dict,
     }
 
 
+DIFFICULTY_ORDER = {"very easy": 0, "easy": 1, "medium": 2, "hard": 3, "insane": 4}
+
+
+def _diff_key(s):
+    return DIFFICULTY_ORDER.get(str(s).lower(), 9)
+
+
+def build_items(machines: dict, challenges: dict,
+                activity_owns: dict | None = None) -> dict:
+    """Per-item done/todo state for all ACTIVE content.
+
+    Self mode uses the authoritative authUser* flags; other-user mode
+    intersects their activity-derived id sets with the active content.
+    """
+    if activity_owns is None:
+        m_user_ids = machines["active_user_ids"]
+        m_root_ids = machines["active_root_ids"]
+        ch_solved_ids = challenges["solved_active_ids"]
+    else:
+        m_user_ids = activity_owns["user_ids"] & machines["active_ids"]
+        m_root_ids = activity_owns["root_ids"] & machines["active_ids"]
+        ch_solved_ids = activity_owns["challenge_ids"] & challenges["active_ids"]
+
+    machine_rows = []
+    for rec in sorted(machines["active_records"], key=lambda x: x["name"].lower()):
+        user, root = rec["id"] in m_user_ids, rec["id"] in m_root_ids
+        status = ("done" if user and root else
+                  "user only" if user else
+                  "root only" if root else "todo")
+        machine_rows.append({"name": rec["name"], "difficulty": rec["difficulty"],
+                             "os": rec["os"], "user": user, "root": root,
+                             "status": status})
+    machine_rows.sort(key=lambda r: (r["status"] != "todo", _diff_key(r["difficulty"]),
+                                     r["name"].lower()))
+
+    challenge_rows = []
+    for rec in sorted(challenges["active_records"], key=lambda x: x["name"].lower()):
+        solved = rec["id"] in ch_solved_ids
+        challenge_rows.append({"name": rec["name"], "difficulty": rec["difficulty"],
+                               "points": rec["points"], "solved": solved})
+    challenge_rows.sort(key=lambda r: (not r["solved"], _diff_key(r["difficulty"]),
+                                       r["name"].lower()))
+
+    return {
+        "machines": machine_rows,
+        "challenges": challenge_rows,
+        "summary": {
+            "machines_done": sum(1 for r in machine_rows if r["status"] == "done"),
+            "machines_total": len(machine_rows),
+            "challenges_solved": sum(1 for r in challenge_rows if r["solved"]),
+            "challenges_total": len(challenge_rows),
+        },
+    }
+
+
 def build_report(profile: dict, machines: dict, challenges: dict,
                  activity_owns: dict | None = None) -> dict:
     own_pct = official_ownership(machines, challenges, activity_owns)
@@ -571,6 +643,7 @@ def build_report(profile: dict, machines: dict, challenges: dict,
             "challenges_active": challenges["active"],
             "challenges_retired": challenges["retired"],
         },
+        "items": build_items(machines, challenges, activity_owns),
     }
 
 
@@ -743,6 +816,62 @@ def render_text(r: dict, full: bool = False) -> str:
 # Main
 # --------------------------------------------------------------------------- #
 
+def render_items(r: dict) -> str:
+    """Itemized checklist of all active machines/challenges (--list)."""
+    items = r["items"]
+    out = []
+
+    def tcell(text, width, *codes):
+        text = str(text)
+        if len(text) > width:
+            text = text[:width - 1] + "…"
+        return paint(text.ljust(width), *codes)
+
+    def mark(flag):
+        return paint("✓", Style.GREEN, Style.BOLD) if flag else paint("·", Style.GREY)
+
+    def status_cell(status):
+        color = {"done": Style.GREEN, "todo": Style.GREY}.get(status, Style.CYAN)
+        return paint(status, color)
+
+    # ---------------- machines ----------------
+    mrows = items["machines"]
+    ms = items["summary"]
+    nw, dw, ow = 24, 9, 9
+    out.append(paint(f'ACTIVE MACHINES — {ms["machines_done"]}/{ms["machines_total"]} done'
+                     f', {ms["machines_total"] - ms["machines_done"]} to go',
+                     Style.BOLD))
+    out.append("  " + paint("Name".ljust(nw) + " ".ljust(1) + "Diff".ljust(dw + 1)
+                             + "OS".ljust(ow + 1) + "U R Status", Style.DIM))
+    for row in mrows:
+        scolor = {"done": Style.GREEN, "todo": Style.GREY}.get(row["status"], Style.CYAN)
+        out.append("  " + tcell(row["name"], nw, Style.BOLD)
+                   + " " + tcell(row["difficulty"], dw)
+                   + " " + tcell(row["os"], ow)
+                   + mark(row["user"]) + " "
+                   + mark(row["root"]) + " "
+                   + paint(str(row["status"]).ljust(9), scolor))
+
+    # ---------------- challenges ----------------
+    crows = items["challenges"]
+    cs = items["summary"]
+    cnw, cdw, cpw = 34, 10, 6
+    out.append("")
+    out.append(paint(f'ACTIVE CHALLENGES — {cs["challenges_solved"]}/{cs["challenges_total"]} solved'
+                     f', {cs["challenges_total"] - cs["challenges_solved"]} to go',
+                     Style.BOLD))
+    out.append("  " + paint("Name".ljust(cnw) + " ".ljust(1) + "Diff".ljust(cdw + 1)
+                             + "Pts".ljust(cpw + 1) + "Status", Style.DIM))
+    for row in crows:
+        out.append("  " + tcell(row["name"], cnw, Style.BOLD)
+                   + " " + tcell(row["difficulty"], cdw)
+                   + " " + tcell(row["points"], cpw)
+                   + (paint("solved".ljust(6), Style.GREEN)
+                      if row["solved"] else paint("todo".ljust(6), Style.GREY)))
+
+    return "\n".join(out)
+
+
 def main() -> int:
     global USE_COLOR
     parser = argparse.ArgumentParser(
@@ -756,6 +885,9 @@ def main() -> int:
                         help="emit machine-readable JSON instead of text")
     parser.add_argument("--full", "-f", action="store_true",
                         help="show all available information (default: simple view)")
+    parser.add_argument("--list", action="store_true",
+                        help="itemize every active machine/challenge with its "
+                             "done/todo status for the selected user")
     parser.add_argument("--timing", action="store_true",
                         help="print per-phase durations to stderr")
     parser.add_argument("--no-color", action="store_true",
@@ -825,6 +957,9 @@ def main() -> int:
         print(json.dumps(report, indent=2))
     else:
         print(render_text(report, full=args.full))
+        if args.list:
+            print()
+            print(render_items(report))
     return 0
 
     if args.json:

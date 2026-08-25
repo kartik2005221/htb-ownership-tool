@@ -23,7 +23,8 @@ No pip installs. No config files. Token comes from an environment variable.
    python3 htb_ownership_tool.py 1234567      # any user by HTB id
    python3 htb_ownership_tool.py someusername # or by username
    python3 htb_ownership_tool.py --full       # every field the API provides
-   python3 htb_ownership_tool.py --json       # machine-readable JSON
+   python3 htb_ownership_tool.py --list       # itemized checklist of active content
+   python3 htb_ownership_tool.py --json       # machine-readable JSON (includes items)
    ```
 
 ### Two views
@@ -33,6 +34,22 @@ No pip installs. No config files. Token comes from an environment variable.
 - **`--full`:** everything — identity detail, formula computation
   (`numerator / denominator × 100`) with per-flag weights, retired totals,
   all-time owns, and both computed and API-provided progression fields.
+- **`--list`:** itemized tables of *all* active machines and challenges with
+  done/todo status for the selected user — a personal checklist of what's left:
+
+```
+ACTIVE MACHINES — 14/19 done, 5 to go
+  Name                     Diff      OS        U R Status
+  SmartHire                Medium    Linux    · · todo
+  Pirate                   Hard      Windows  · · todo
+  ...
+  Cohort                   Easy      Linux    ✓ ✓ done
+
+ACTIVE CHALLENGES — 0/198 solved, 198 to go
+  Name                               Diff       Pts    Status
+  Baby Frame                         Very Easy  0     todo
+  ...
+```
 
 ### Output styling
 
