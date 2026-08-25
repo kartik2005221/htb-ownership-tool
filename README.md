@@ -19,19 +19,28 @@ No pip installs. No config files. Token comes from an environment variable.
 3. Run:
 
    ```bash
-   python3 htb_ownership_tool.py              # your own overview
-   python3 htb_ownership_tool.py 2274028      # any user by HTB id
+   python3 htb_ownership_tool.py              # your own overview (simple view)
+   python3 htb_ownership_tool.py 1234567      # any user by HTB id
    python3 htb_ownership_tool.py someusername # or by username
+   python3 htb_ownership_tool.py --full       # every field the API provides
    python3 htb_ownership_tool.py --json       # machine-readable JSON
    ```
+
+### Two views
+
+- **Simple (default):** rank, ownership bar with API cross-check, next-rank
+  progress, active content totals.
+- **`--full`:** everything — identity detail, formula computation
+  (`numerator / denominator × 100`) with per-flag weights, retired totals,
+  all-time owns, and both computed and API-provided progression fields.
 
 ### Output styling
 
 The report is colored (ANSI, no dependencies): rank names are colored by tier,
 ownership/progress bars use block characters, and the computed ownership is
-marked `✓ matches HTB` / `⚠ differs` against the API's own number. Colors turn
-off automatically when stdout is piped or redirected, when `NO_COLOR` is set,
-or via `--no-color` — `--json` output is never styled.
+marked `✓` / `⚠` against the API's own number. Colors turn off automatically
+when stdout is piped or redirected, when `NO_COLOR` is set, or via
+`--no-color` — `--json` output is never styled.
 
 ### How other users' ownership is computed
 
@@ -40,41 +49,67 @@ owner**, so for other users the script reconstructs their own-history from
 their public activity feed (`GET /api/v5/user/profile/activity/{id}`, entries
 `root` / `user` / `challenge`) and intersects it with the currently-active
 machine/challenge sets before applying HTB's formula. The result is
-cross-checked against that user's `rank_ownership` from their profile — on a
-Pro Hacker test account both agreed exactly (45.96%).
+cross-checked against that user's `rank_ownership` from their profile — on
+every account tested so far, computed and API-reported values matched exactly.
 
 The script only reads `HTB_TOKEN` from the environment — it never logs it,
 prints it, or writes it anywhere. `.gitignore` blocks token/env files anyway.
 
 ## Example output
 
+Dummy data, simple view (default):
+
 ```
-==============================================================
-  HACK THE BOX — CONTENT OWNERSHIP OVERVIEW
-==============================================================
-  Username                       kallu752
-  Rank (profile)                 Hacker
-  Rank (from ownership)          Hacker
-  Global ranking                 #785
-  Points                         247
---------------------------------------------------------------
-  Machine user owns (all time)   27
-  Machine system owns (all time) 24
-  Machine full owns (all time)   24
-  Challenge solves (all time)    0
---------------------------------------------------------------
-  Machines total / active        548 / 19
-  Challenges total / active      850 / 198
---------------------------------------------------------------
-  CONTENT OWNERSHIP (HTB formula) 43.48%
-    reported by HTB API          43.48%
-    active system owns (weight 1) 14
-    active user owns (weight 1/2) 14
-    active challenge owns (weight 1/10) 0
---------------------------------------------------------------
-  Next rank: Pro Hacker (>45.0%) 93.92% there
-  API next-rank fields           Pro Hacker, progress 93.92%, points left 19.566, sys owns req 20
-==============================================================
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HTB CONTENT OWNERSHIP · example_user
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Rank .................. Hacker  ·  #1234 global  ·  320 points
+  Ownership ............. ████████░░░░░░░░░░░░░░ 35.00%  ✓ HTB says 35.00%
+      system 10 · user 12 · challenge 15 (active content)
+  Next rank ............. Pro Hacker  (> 45%)
+  Progress .............. █████████████░░░░░░░░░ 60.00%
+  Active content ........ 20/548 machines  ·  200/850 challenges
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+`--full` view (same dummy data):
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  HTB CONTENT OWNERSHIP · example_user
+────────────────────────────────────────────────────────────────
+  IDENTITY
+  Username .............. example_user
+  User id ............... 1234567
+  Viewing ............... your own account
+  Rank (profile) ........ Hacker
+  Rank (computed) ....... Hacker
+  Global ranking ........ #1234
+  Points ................ 320
+  CONTENT OWNERSHIP (official HTB formula)
+  Ownership ............. ████████░░░░░░░░░░░░░░ 35.00%
+  Reported by API ....... 35.00% ✓ HTB says 35.00%
+  Computation ........... 17.5 / 50 × 100
+  Active system owns .... 10  (weight ×1)
+  Active user owns ...... 12  (weight ×1/2)
+  Active challenge owns .. 15  (weight ×1/10)
+  ACTIVE CONTENT
+  Machines .............. 20 active / 548 total  (548 records fetched)
+  Challenges ............ 200 active / 850 total
+  Retired challenges .... 650
+  ALL-TIME OWNS
+  Machine user owns ..... 16
+  Machine system owns ... 11
+  Challenge solves ...... 42
+  PROGRESSION
+  Next rank (ownership) .. Pro Hacker  (threshold > 45%)
+  Interpolated progress .. █████████████░░░░░░░░░ 60.00%
+  API next-rank name .... Pro Hacker
+  API rank progress ..... 60.00%
+  API points remaining .. 25.5
+  API sys owns required .. 45
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  formula & thresholds: help.hackthebox.com — 'Introduction to HTB Labs'
 ```
 
 ## What "Content Ownership %" means
@@ -100,9 +135,9 @@ Official rank thresholds: Noob ≥0%, Script Kiddie >5%, Hacker >20%, Pro Hacker
 >45%, Elite Hacker >70%, Guru >90%, Omniscient 100%.
 
 The script computes this independently and cross-checks it against HTB's own
-number (`rank_ownership` from the profile endpoint). On the test account both
-agree exactly (43.48%), as does the interpolated progress to next rank
-(93.92% vs the API's `current_rank_progress`).
+number (`rank_ownership` from the profile endpoint). On every account tested,
+computed and API-reported values matched exactly, as did the interpolated
+progress to the next rank versus the API's `current_rank_progress`.
 
 ## Data sources
 
