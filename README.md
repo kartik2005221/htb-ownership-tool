@@ -25,6 +25,14 @@ No pip installs. No config files. Token comes from an environment variable.
    python3 htb_ownership_tool.py --json       # machine-readable JSON
    ```
 
+### Output styling
+
+The report is colored (ANSI, no dependencies): rank names are colored by tier,
+ownership/progress bars use block characters, and the computed ownership is
+marked `✓ matches HTB` / `⚠ differs` against the API's own number. Colors turn
+off automatically when stdout is piped or redirected, when `NO_COLOR` is set,
+or via `--no-color` — `--json` output is never styled.
+
 ### How other users' ownership is computed
 
 The `authUserIn*Owns` flags on list endpoints always describe **the token

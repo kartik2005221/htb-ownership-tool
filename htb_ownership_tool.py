@@ -50,6 +50,76 @@ TOKEN_ENV = "HTB_TOKEN"
 
 
 # --------------------------------------------------------------------------- #
+# Terminal styling — raw ANSI codes, no dependencies.
+# Auto-disabled when stdout is not a TTY (pipes/redirects/--json stay clean),
+# when NO_COLOR is set, or via --no-color.
+# --------------------------------------------------------------------------- #
+
+class Style:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[97m"
+    GREY = "\033[90m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_YELLOW = "\033[93m"
+
+
+USE_COLOR = False
+
+
+def paint(text, *codes: str) -> str:
+    if not USE_COLOR or text is None:
+        return "" if text is None else str(text)
+    return "".join(codes) + str(text) + Style.RESET
+
+
+# One color per rank tier, aligned with RANK_LADDER order below.
+RANK_TIER_COLORS = [
+    Style.GREY,             # Noob
+    Style.WHITE,            # Script Kiddie
+    Style.GREEN,            # Hacker
+    Style.CYAN,             # Pro Hacker
+    Style.BLUE,             # Elite Hacker
+    Style.MAGENTA,          # Guru
+    Style.BRIGHT_YELLOW,    # Omniscient
+]
+
+
+def rank_color(rank_name) -> str:
+    if not rank_name:
+        return Style.GREY
+    for i, (name, _) in enumerate(RANK_LADDER):
+        if name.lower() == str(rank_name).lower():
+            return RANK_TIER_COLORS[i]
+    return Style.WHITE
+
+
+def tier_color_for_pct(pct: float) -> str:
+    """Color reflecting which ownership tier a percentage falls into."""
+    if pct >= 100:
+        return RANK_TIER_COLORS[6]
+    code = RANK_TIER_COLORS[0]
+    for i, (_, threshold) in enumerate(RANK_LADDER[1:], start=1):
+        if pct > threshold:
+            code = RANK_TIER_COLORS[i]
+    return code
+
+
+def bar(pct_value: float, width: int = 22, color: str = Style.CYAN) -> str:
+    pct_value = max(0.0, min(100.0, float(pct_value or 0)))
+    filled = int(round(width * pct_value / 100.0))
+    blocks = "█" * filled + "░" * (width - filled)
+    return paint(blocks, color, Style.BOLD)
+
+
+# --------------------------------------------------------------------------- #
 # Errors
 # --------------------------------------------------------------------------- #
 
@@ -487,52 +557,92 @@ def _prev_threshold(rank_name: str) -> float:
 
 
 def render_text(r: dict) -> str:
-    def line(label, value):
-        return f"  {label:<30} {value}"
-
+    WIDTH = 64
     o, w, t = r["owns"], r["content_totals"], r["ownership_percent"]
     nb = r["next_rank_by_ownership"]
     pf = r["profile_next_rank_fields"]
-    who = r["username"] or "?"
-    if not r.get("is_self"):
-        who = f'{who} (id {r.get("user_id")})'
+
+    def rule(char="─", code=Style.GREY):
+        return paint(char * WIDTH, code)
+
+    def header(text):
+        return "  " + paint(text, Style.DIM, Style.BRIGHT_CYAN)
+
+    def kv(label, value):
+        dots = "." * max(2, 24 - len(label))
+        return f"  {paint(label, Style.WHITE)} {paint(dots, Style.GREY)} {value}"
+
     out = []
-    out.append("=" * 62)
-    out.append("  HACK THE BOX — CONTENT OWNERSHIP OVERVIEW")
-    out.append("=" * 62)
-    out.append(line("Username", who))
-    out.append(line("Rank (profile)", r["rank"] or "-"))
-    out.append(line("Rank (from ownership)", r["rank_from_ownership"]))
-    out.append(line("Global ranking", "#" + str(r["global_ranking"]) if r["global_ranking"] else "-"))
-    out.append(line("Points", r["points"]))
-    out.append("-" * 62)
-    out.append(line("Machine user owns (all time)", o["machine_user_owns"]))
-    out.append(line("Machine system owns (all time)", o["machine_system_owns"]))
-    out.append(line("Challenge solves (all time)", o["challenge_solves"]))
-    out.append("-" * 62)
-    out.append(line("Machines total / active", f'{w["machines_total"]} / {w["machines_active"]}'))
-    out.append(line("Challenges total / active", f'{w["challenges_total"]} / {w["challenges_active"]}'))
-    out.append("-" * 62)
-    out.append(line("CONTENT OWNERSHIP (HTB formula)", f'{t["overall"]}%'))
-    if t.get("reported_by_api") is not None:
-        out.append(line("  reported by HTB API", f'{t["reported_by_api"]}%'))
-    out.append(line("  active system owns (weight 1)", t["active_system_owns"]))
-    out.append(line("  active user owns (weight 1/2)", t["active_user_owns"]))
-    out.append(line("  active challenge owns (weight 1/10)", t["active_challenge_owns"]))
-    out.append("-" * 62)
+    who = r["username"] or "?"
+    if not r.get("is_self") and r.get("user_id"):
+        who += f" (id {r['user_id']})"
+
+    out.append(rule("━", Style.CYAN))
+    title = "  HTB CONTENT OWNERSHIP · "
+    out.append(title + paint(who, Style.BOLD, Style.BRIGHT_CYAN))
+    out.append(rule("━", Style.CYAN))
+
+    out.append(header("IDENTITY"))
+    rank_val = paint(str(r["rank"] or "-"), Style.BOLD,
+                     rank_color(r["rank"]))
+    if r.get("rank_from_ownership"):
+        computed = paint(str(r["rank_from_ownership"]), Style.BOLD,
+                         rank_color(r["rank_from_ownership"]))
+        rank_val += paint("   (from ownership: ", Style.GREY) + computed + paint(")", Style.GREY)
+    out.append(kv("Rank", rank_val))
+    ranking = "#" + str(r["global_ranking"]) if r["global_ranking"] else "-"
+    out.append(kv("Global ranking", paint(ranking, Style.BOLD)))
+    out.append(kv("Points", paint(str(r["points"] if r["points"] is not None else "-"),
+                                  Style.BOLD)))
+
+    out.append(header("CONTENT OWNERSHIP"))
+    pct_v = t["overall"]
+    tier = tier_color_for_pct(pct_v)
+    out.append(kv("Ownership",
+                  f"{bar(pct_v, color=tier)} {paint(f'{pct_v:.2f}%', Style.BOLD, tier)}"))
+    reported = t.get("reported_by_api")
+    if reported is not None:
+        match = abs(float(reported) - float(pct_v)) < 0.01
+        mark = paint("✓ matches HTB" if match else "⚠ differs from HTB",
+                     Style.GREEN if match else Style.YELLOW)
+        out.append(kv("HTB API reports", f"{paint(f'{reported:.2f}%', Style.BOLD)} {mark}"))
+    out.append(kv("Active owns",
+                  paint("system ", Style.GREY) + paint(str(t["active_system_owns"]), Style.BOLD)
+                  + paint(" · user ", Style.GREY) + paint(str(t["active_user_owns"]), Style.BOLD)
+                  + paint(" · challenge ", Style.GREY) + paint(str(t["active_challenge_owns"]), Style.BOLD)))
+
+    out.append(header("ACTIVE CONTENT"))
+    out.append(kv("Machines",
+                  paint(str(w["machines_active"]), Style.BOLD, Style.GREEN)
+                  + paint(f" active / {w['machines_total']} total", Style.GREY)))
+    out.append(kv("Challenges",
+                  paint(str(w["challenges_active"]), Style.BOLD, Style.GREEN)
+                  + paint(f" active / {w['challenges_total']} total", Style.GREY)))
+
+    out.append(header("ALL-TIME OWNS"))
+    out.append(kv("Machine user", paint(str(o["machine_user_owns"]), Style.BOLD)))
+    out.append(kv("Machine system", paint(str(o["machine_system_owns"]), Style.BOLD)))
+    out.append(kv("Challenge solves", paint(str(o["challenge_solves"]), Style.BOLD)))
+
+    out.append(header("PROGRESSION"))
     if nb.get("name"):
-        out.append(line(f'Next rank: {nb["name"]} (>{nb["threshold"]}%)',
-                        f'{nb["progress_percent"]}% there'))
-    if pf.get("name"):
-        out.append(line("API next-rank fields", f'{pf["name"]}, '
-                        f'progress {pf["progress_percent"]}%, '
-                        f'points left {pf["points_remaining"]}, '
-                        f'sys owns req {pf["system_owns_required"]}'))
-    out.append("=" * 62)
-    out.append("  Ownership formula & rank thresholds:")
-    out.append("  help.hackthebox.com — 'Introduction to HTB Labs'")
-    out.append("=" * 62)
-    return "\n".join(str(x) for x in out)
+        nxt_col = rank_color(nb["name"])
+        out.append(kv("Next rank",
+                      paint(str(nb["name"]), Style.BOLD, nxt_col)
+                      + paint(f'  (> {nb["threshold"]:g}%)', Style.GREY)))
+        prog = nb.get("progress_percent")
+        if prog is not None:
+            out.append(kv("Progress",
+                          f"{bar(prog, color=nxt_col)} "
+                          + paint(f"{prog:.2f}%", Style.BOLD, nxt_col)))
+    elif pf.get("name"):
+        out.append(kv("Next rank", paint(str(pf["name"]),
+                                         Style.BOLD, rank_color(pf["name"]))))
+
+    out.append(rule("━", Style.CYAN))
+    out.append(paint("  formula & thresholds: help.hackthebox.com — 'Introduction to HTB Labs'",
+                     Style.DIM))
+    return "\n".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -540,6 +650,7 @@ def render_text(r: dict) -> str:
 # --------------------------------------------------------------------------- #
 
 def main() -> int:
+    global USE_COLOR
     parser = argparse.ArgumentParser(
         description="Hack The Box Content Ownership overview (stdlib only). "
                     "Pass a numeric user id or username to inspect any account; "
@@ -549,37 +660,57 @@ def main() -> int:
                         help="HTB user id or username (default: yourself)")
     parser.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON instead of text")
+    parser.add_argument("--no-color", action="store_true",
+                        help="disable colored output (also auto-disabled when "
+                             "piped, or when NO_COLOR is set)")
     args = parser.parse_args()
+
+    USE_COLOR = (
+        not args.no_color
+        and not os.environ.get("NO_COLOR")
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+    if os.name == "nt":
+        os.system("")  # best-effort: enable ANSI escapes on Windows 10+ consoles
+
+    def step(msg):
+        print(paint(f"==> {msg}", Style.DIM), file=sys.stderr)
 
     try:
         token = load_token()
         activity_owns = None
 
         if args.user is None:
-            print("[1/4] Authenticating...", file=sys.stderr)
+            step("Authenticating...")
             profile = fetch_profile(token)
         else:
-            print(f"[1/4] Resolving user {args.user!r}...", file=sys.stderr)
+            step(f"Resolving user {args.user!r}...")
             target = resolve_user(token, args.user)
-            print(f"      -> {target['name']} (id {target['id']})", file=sys.stderr)
+            step(f"Found {target['name']} (id {target['id']})")
             profile = fetch_profile(token, target["id"])
 
-        print("[2/4] Fetching machine catalog...", file=sys.stderr)
+        step("Fetching machine catalog...")
         machines = fetch_machines(token)
 
-        print("[3/4] Fetching challenges...", file=sys.stderr)
+        step("Fetching challenges...")
         challenges = fetch_challenges(token)
 
         if args.user is not None:
-            print(f"[3b/4] Reconstructing {profile.get('name')}'s active owns "
-                  "from their activity feed...", file=sys.stderr)
+            step(f"Reconstructing {profile.get('name')}'s active owns "
+                 "from their activity feed...")
             activity_owns = fetch_activity_owns(token, profile["_queried_user_id"])
 
-        print("[4/4] Building report...", file=sys.stderr)
         report = build_report(profile, machines, challenges, activity_owns)
     except HtbToolError as exc:
-        print(f"\nERROR: {exc}", file=sys.stderr)
+        print(f"\n{paint('ERROR:', Style.BOLD, Style.RED)} {exc}", file=sys.stderr)
         return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_text(report))
+    return 0
 
     if args.json:
         clean = {k: v for k, v in report.items()}
