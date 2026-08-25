@@ -1,0 +1,18 @@
+# --- secrets: never commit tokens or env files ---
+.htb_token
+*token*
+*TOKEN*
+*.env
+.env.*
+secrets*
+credentials*
+
+# --- python ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# --- tooling ---
+.DS_Store
+*.log
